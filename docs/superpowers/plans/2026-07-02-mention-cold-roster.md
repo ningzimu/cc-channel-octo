@@ -1,35 +1,31 @@
-# Plan: 修复冷 roster / 新子区首条 @ 灰字(mention 显名边界)
+# Plan: 修复 @ 灰字(mention 显名)—— 模型格式 + 冷 roster 边界
 
-## 背景
-已合的 #178+#88 让**热 thread** 的 @人/@bot 正常显名。但仍有灰字边界(截图实证):
-1. **模型格式错**:即便 #178 prompt 写了"禁字面 uid",模型(实测 cc 自己)仍会把 `@[<uid>:<displayName>]` 里的 `<uid>` **塌缩成字面单词 `uid`** 去填、真 uid 塞进名字槽 → 解析出无效 uid → entity 被丢 → 灰字。抽象占位符把模型带偏。
-2. **冷 roster**:outbound `resolveMentions`(stream-relay.ts:223)用 `isValidUid = isMember(channelId, uid)`(index.ts:982)做 A8(#143)防幻觉校验。某 channel 的 roster 没热(uid 不在成员快照)→ **即便结构化格式正确,entity 也被过滤掉** → 降级成灰字 `@名字`。正常回复路径入站已 `refreshMembers`(index.ts:484)预热,所以边界只出在**新建子区首条 / 旁路发送**(命令/进度/直接 sendMessage)这类不走回复预热的路径。
+## 背景 / 两个独立成因(重排主次)
+已合 #178+#88 让**正常回复路径 + 热 roster** 的 @ 显名。剩余灰字两类:
 
-范围:只 cc-channel-octo。不碰 OpenClaw。不放松 A8 成员守卫(防幻觉 uid 仍要拦)。
+1. **模型格式错(主因,Part A)**:模型把 `@[<uid>:<displayName>]` 的 `<uid>` 占位符**塌缩成字面单词 `uid`**、真 uid 塞名字槽 → 无效 uid → A8 丢 entity → 灰字。实测本 bot 反复犯。#178 抽象占位符没能防住。
+2. **冷 roster A8 丢 entity(次因/窄边界,Part B)**:outbound `resolveMentions`(stream-relay.ts:223)用 `isValidUid = isMember(channelId, uid)`(index.ts:982)。**注意**:正常入站回复**已在 index.ts:484 `await refreshMembers(channelId)` 预热**(含新建子区首条正常回复),所以冷 roster **只影响不走该预热的路径**:命令回复在 refresh 前返回、工具/外部建区后直接 `sendMessage`、其他旁路 direct send。这些路径**很多根本不经 resolveMentions**,预热了也不生成 entity。
 
-## 修复(两头,缺一都留灰字)
+范围:只 cc-channel-octo,不碰 OpenClaw,**不放松 A8 防幻觉**。
 
-### Part A — prompt(agent-bridge.ts)
-把抽象 `<uid>` 占位符换成**具体 worked example**,让模型无法塌缩成字面 "uid":
-- 明确"看到发送者前缀 `名字(uid)`,例如 `caster(d71255…)`,就写 `@[d71255…:caster]` —— **真 uid 在前、显示名在后**";
-- 保留"绝不产出字面单词 uid"。
-- 纯文案。
+## 待坐实(定 Part B 范围的前提)
+截图那条 `@Qopenclaw @Qcodex` 灰字:是**正常 agent 回复**(则已走 484 预热 → 主因是格式错 = Part A)?还是**直接 sendMessage 旁路**(则冷 roster = Part B)?→ 查该消息的原始 assistant 输出 + 发送路径再定 Part B 是否需要、需要到哪。
 
-### Part B — 冷 roster 兜底(代码,不放松 A8)
-outbound 解析 mention 前,若目标 channel 的 roster 冷(memberMap 空/未含被 @ 的 uid),**先同步预热再解析**:
-- **主修**:发送前对该 channelId 若 memberMap 为空则 `await refreshMembers(channelId)`(节流已存在,热则近乎 no-op),覆盖"新子区首条 / 旁路发送"路径;
-- **兜底(可选)**:结构化 mention 的 uid 过 A8 校验失败时,按该 uid 先 `fetchAndLearnUser`/refresh 回填一次,再决定是否保留 entity —— A8 守卫不放松,只是"先补数据再判"。
-- 具体接入点:stream-relay 的 `deliver()` 前置,或 index.ts 组装 isValidUid 前确保预热。②plan review 时定主修落点。
+## Part A — prompt(agent-bridge.ts,主修)
+把抽象 `<uid>` 换成**具体 worked example**,杜绝塌缩:
+- "发送者前缀是 `名字(uid)`,例如 `caster(d71255…)`;要 @ 他就写 `@[d71255…:caster]` —— **真 uid 在前、显示名在后**;绝不写字面单词 uid。"
+- 纯文案。这是最高频、成本最低、直接治主因的一环。
+
+## Part B — 冷 roster 兜底(代码,按坐实结果决定做多少)
+**授权刷新 + 不破 A8:**
+- 解析出结构化 mention 的 uid 列表后,**若任一 uid 不在该 channel 的 memberMap → `await refreshMembers(channelId)` 一次(authoritative)→ 再跑 A8 isMember 判定**。miss-based(不是"map 空才刷");group-only;每 turn 至多一次;热且刚刷过靠现有节流跳过(不加网络)。
+- **禁止**用 `fetchAndLearnUser`/`learnMember` 来"补进 memberMap 过 A8"——那会让非成员/幻觉 uid 蒙混过关(P1)。真需要展示名而 uid 非成员,只存旁路缓存,不参与 isMember。
+- **旁路 direct send(命令/进度/错误)范围决策**:这些多不含 @、且不经 resolveMentions。默认**划出本单范围**(声明它们不做 mention 解析);仅当坐实截图那条走的是某条 direct-send 且确需 @,才抽一个共享 group-send helper(内做预热+resolveMentions+entity 注入)替换那几个 `sendMessage` 调用点——这条作为**可选扩展**,②review 定要不要。
 
 ## 测试
-- 冷 roster + 结构化 `@[真uid:名字]`:预热后 entity 保留、不降级灰字。
-- 新 thread 首条 outbound @:显名(集成)。
-- A8 防幻觉不回归:非成员的幻觉 uid 仍被拦(补热后仍不在成员表 → 照旧丢)。
-- Part A 格式:文案含具体范例(无法自动测模型行为,靠范例约束 + 人核)。
+- Part B:memberMap 缺被 @ 的 uid → 触发一次 refresh(spy `getGroupMembers` 计数)、补齐后 entity 保留;热/刚刷过 → 不重复打网络。
+- A8 不回归:refresh 后仍非成员的幻觉 uid → 照旧丢 entity(**不因回填被放过**)。
+- Part A:文案含具体范例(模型行为靠范例约束 + 人核)。
 
 ## Rollout
-Qcodex + Qopenclaw 审 plan(②)、审代码(④)→ 本地部署验证(新建子区首条 @ 显名)→ caster 测过 → 合一个 PR。#178 已合,本轮独立。
-
-## 待定(②review 定)
-- Part B 主修落点(stream-relay 前置 vs index 预热),以及"每条 outbound 都查空 memberMap"会不会加延迟(热则 refreshMembers 节流跳过,应可忽略;需确认)。
-- Part B 的"on-miss 回填"要不要一并做,还是先只做预热(主修)。
+Qcodex + Qopenclaw 审 plan(②)、审代码(④)→ 本地部署验证(新建子区/旁路首条 @ 显名 + 格式塌缩不再复现)→ caster 测过 → 合一个 PR。#178 已合,本轮独立。
