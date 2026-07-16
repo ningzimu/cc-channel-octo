@@ -18,6 +18,11 @@ import { randomUUID } from "node:crypto";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+function withDefaultTimeout(signal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
 /**
  * Maximum base64-encoded payload length accepted from /v1/bot/messages/sync.
  * D1/S7 (齐 P0-2): a malicious or buggy server could return a single payload
@@ -65,10 +70,7 @@ export async function postJson<T>(
   signal?: AbortSignal,
 ): Promise<T | undefined> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
-  const effectiveSignal = signal
-    ? AbortSignal.any([signal, timeoutSignal])
-    : timeoutSignal;
+  const effectiveSignal = withDefaultTimeout(signal);
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -168,7 +170,7 @@ export async function getUploadCredentials(params: {
 }> {
   const base = params.apiUrl.replace(/\/+$/, "");
   const url = `${base}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
-  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = withDefaultTimeout(params.signal);
   const response = await fetch(url, {
     method: "GET",
     headers: { Authorization: `Bearer ${params.botToken}` },
@@ -274,10 +276,7 @@ async function getJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
-  const effectiveSignal = signal
-    ? AbortSignal.any([signal, timeoutSignal])
-    : timeoutSignal;
+  const effectiveSignal = withDefaultTimeout(signal);
   const resp = await fetch(url, {
     method: "GET",
     headers: {
@@ -531,7 +530,7 @@ async function requestNoBody(
   signal?: AbortSignal,
 ): Promise<void> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = withDefaultTimeout(signal);
   const resp = await fetch(url, {
     method,
     headers: { Authorization: `Bearer ${botToken}` },
@@ -799,7 +798,7 @@ export async function updateGroupMd(params: {
 }): Promise<{ version: number }> {
   const path = `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/md`;
   const url = `${params.apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = withDefaultTimeout(params.signal);
   const resp = await fetch(url, {
     method: "PUT",
     headers: {
@@ -844,7 +843,7 @@ export async function updateThreadMd(params: {
 }): Promise<{ version: number }> {
   const path = `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`;
   const url = `${params.apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = withDefaultTimeout(params.signal);
   const resp = await fetch(url, {
     method: "PUT",
     headers: {

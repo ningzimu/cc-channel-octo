@@ -6,7 +6,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getGroupMembers, postJson } from "../octo/api.js";
+import {
+  getGroupMembers,
+  getUploadCredentials,
+  leaveThread,
+  postJson,
+  updateGroupMd,
+  updateThreadMd,
+} from "../octo/api.js";
 
 // Mock the global fetch before any postJson calls.
 const mockFetch = vi.fn();
@@ -186,6 +193,72 @@ describe("GET request cancellation", () => {
       groupNo: "group-1",
       signal: controller.signal,
     });
+
+    const options = mockFetch.mock.calls[0][1] as RequestInit;
+    const effectiveSignal = options.signal as AbortSignal;
+    expect(effectiveSignal).not.toBe(controller.signal);
+    expect(effectiveSignal.aborted).toBe(false);
+
+    controller.abort(new Error("dispatch timed out"));
+    expect(effectiveSignal.aborted).toBe(true);
+  });
+});
+
+describe("direct API request cancellation", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        bucket: "bucket",
+        region: "region",
+        key: "key",
+        credentials: {
+          tmpSecretId: "id",
+          tmpSecretKey: "key",
+          sessionToken: "token",
+        },
+        startTime: 1,
+        expiredTime: 2,
+      }),
+      text: () => Promise.resolve('{"version": 1}'),
+    });
+  });
+
+  const requests: Array<[string, (signal: AbortSignal) => Promise<unknown>]> = [
+    ["getUploadCredentials", (signal) => getUploadCredentials({
+      apiUrl: "https://api.example.com",
+      botToken: "test-token",
+      filename: "file.txt",
+      signal,
+    })],
+    ["leaveThread", (signal) => leaveThread({
+      apiUrl: "https://api.example.com",
+      botToken: "test-token",
+      groupNo: "group-1",
+      shortId: "thread-1",
+      signal,
+    })],
+    ["updateGroupMd", (signal) => updateGroupMd({
+      apiUrl: "https://api.example.com",
+      botToken: "test-token",
+      groupNo: "group-1",
+      content: "rules",
+      signal,
+    })],
+    ["updateThreadMd", (signal) => updateThreadMd({
+      apiUrl: "https://api.example.com",
+      botToken: "test-token",
+      groupNo: "group-1",
+      shortId: "thread-1",
+      content: "rules",
+      signal,
+    })],
+  ];
+
+  it.each(requests)("%s combines caller cancellation with the default timeout", async (_name, request) => {
+    const controller = new AbortController();
+    await request(controller.signal);
 
     const options = mockFetch.mock.calls[0][1] as RequestInit;
     const effectiveSignal = options.signal as AbortSignal;

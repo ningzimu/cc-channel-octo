@@ -171,6 +171,31 @@ describe('resolveGroupInstructions (thread branch)', () => {
     expect(call0Url()).toBe(`${BASE.apiUrl}/v1/bot/groups/${GROUP}/threads/${SHORT}/md`);
   });
 
+  it('does not cache or return a delayed server result after cancellation', async () => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    fetchMock.mockImplementationOnce(
+      () => new Promise<Response>((resolve) => { resolveFetch = resolve; }),
+    );
+    const threadCache = new ThreadMdCache();
+    const controller = new AbortController();
+
+    const pending = resolveGroupInstructions({
+      groupConfigDir: cfgDir,
+      threadMd: true,
+      ...BASE,
+      channelId: CHANNEL,
+      threadCache,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    controller.abort(new Error('dispatch timed out'));
+    resolveFetch?.(mockMd('stale thread rules'));
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(threadCache.get(GROUP, SHORT)).toBeUndefined();
+  });
+
   it('caches the server fetch — a second call serves from cache (no second fetch)', async () => {
     fetchMock.mockResolvedValueOnce(mockMd('server THREAD rules'));
     const threadCache = new ThreadMdCache();

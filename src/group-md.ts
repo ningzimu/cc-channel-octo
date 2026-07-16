@@ -116,6 +116,7 @@ async function resolveGroupBranch(
 ): Promise<string | undefined> {
   const { groupConfigDir, serverMd, apiUrl, botToken, channelId, cache, signal } = params;
 
+  if (signal?.aborted) return undefined;
   const local = (): string | undefined => loadGroupConfig(groupConfigDir, channelId);
 
   // Flag off (or no cache to dedupe fetches) → pure local file, unchanged behavior.
@@ -137,6 +138,7 @@ async function resolveGroupBranch(
   // b) server-first fetch.
   try {
     const md = await getGroupMd({ apiUrl, botToken, groupNo, signal });
+    if (signal?.aborted) return undefined;
     const bounded = boundInstructions(md?.content ?? '');
     if (bounded) {
       const entry: GroupMdEntry = {
@@ -151,6 +153,7 @@ async function resolveGroupBranch(
     // Server reachable but no/empty GROUP.md → local fallback.
     return local();
   } catch (err) {
+    if (signal?.aborted) return undefined;
     // c) 404 / network / timeout — never-lose local fallback.
     console.error(
       `[cc-channel-octo] group-md: server fetch for ${groupNo} failed, falling back to local: ${String(err)}`,
@@ -180,6 +183,7 @@ async function resolveThreadInstructions(
 ): Promise<string | undefined> {
   const { groupConfigDir, threadMd, apiUrl, botToken, channelId, threadCache, signal } = params;
 
+  if (signal?.aborted) return undefined;
   // Local fallback keeps the FULL channelId — loadGroupConfig routes a thread to
   // its own `<shortId>.md`, never the parent group's `<groupNo>.md`.
   const local = (): string | undefined => loadGroupConfig(groupConfigDir, channelId);
@@ -207,6 +211,7 @@ async function resolveThreadInstructions(
   // b) server-first fetch of this thread's own THREAD.md.
   try {
     const md = await getThreadMd({ apiUrl, botToken, groupNo, shortId, signal });
+    if (signal?.aborted) return undefined;
     const bounded = boundInstructions(md?.content ?? '');
     if (bounded) {
       const entry: GroupMdEntry = {
@@ -221,6 +226,7 @@ async function resolveThreadInstructions(
     // Server reachable but no/empty THREAD.md → local fallback.
     return local();
   } catch (err) {
+    if (signal?.aborted) return undefined;
     // c) 404 / network / timeout — never-lose local fallback.
     console.error(
       `[cc-channel-octo] thread-md: server fetch for ${groupNo}::${shortId} failed, falling back to local: ${String(err)}`,

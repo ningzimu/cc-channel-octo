@@ -15,6 +15,7 @@ vi.mock('../octo/api.js', () => ({
   sendTyping: vi.fn().mockResolvedValue(undefined),
   sendReadReceipt: vi.fn().mockResolvedValue(undefined),
   getGroupMembers: vi.fn().mockResolvedValue([]),
+  getGroupMd: vi.fn().mockResolvedValue(undefined),
   // G4 backfill path in the real handleMessage — default to no history.
   getChannelMessages: vi.fn().mockResolvedValue([]),
   getUploadCredentials: vi.fn().mockResolvedValue({
@@ -65,6 +66,7 @@ vi.mock('../media-inbound.js', async (importOriginal) => {
 import { SessionStore } from '../session-store.js';
 import { SessionRouter } from '../session-router.js';
 import { GroupContext } from '../group-context.js';
+import { GroupMdCache } from '../group-md-cache.js';
 import { StreamRelay } from '../stream-relay.js';
 import { createAdapter, type DbAdapter } from '../db-adapter.js';
 import { queryAgent } from '../agent-bridge.js';
@@ -73,6 +75,7 @@ import {
   sendMessage,
   sendReadReceipt,
   getGroupMembers,
+  getGroupMd,
   getChannelMessages,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
@@ -173,8 +176,19 @@ async function simulateMessage(
   router: SessionRouter,
   groupContext: GroupContext,
   streamRelay: StreamRelay,
+  groupMdCache?: GroupMdCache,
 ): Promise<void> {
-  await handleMessage(msg, config, store, router, groupContext, streamRelay, BOT_ID);
+  await handleMessage(
+    msg,
+    config,
+    store,
+    router,
+    groupContext,
+    streamRelay,
+    BOT_ID,
+    undefined,
+    groupMdCache,
+  );
 }
 
 // --- Tests ---
@@ -569,6 +583,43 @@ describe('E2E smoke tests', () => {
     expect(getChannelMessages).toHaveBeenCalledTimes(2);
     expect(store.buildHistoryPrefix(channelId, 40)).toContain('retry history');
     expect(store.buildHistoryPrefix(channelId, 40)).not.toContain('stale history');
+  });
+
+  it('dispatch timeout prevents delayed GROUP.md fetches from mutating the cache', async () => {
+    const channelId = 'group-cancelled-md';
+    const timeoutConfig = makeConfig({ dispatchTimeoutMs: 10, serverMd: true });
+    const timeoutRouter = new SessionRouter(timeoutConfig, BOT_ID);
+    const groupMdCache = new GroupMdCache();
+    let resolveMd: ((md: { content: string; version: number; updated_at: string; updated_by: string }) => void) | undefined;
+    (getGroupMd as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveMd = resolve; }),
+    );
+
+    const processing = simulateMessage(
+      makeGroupMsg('delayed group instructions', true, { channel_id: channelId }),
+      timeoutConfig,
+      store,
+      timeoutRouter,
+      groupContext,
+      streamRelay,
+      groupMdCache,
+    );
+    await vi.waitFor(() => expect(getGroupMd).toHaveBeenCalledTimes(1));
+    const request = (getGroupMd as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(request.signal).toBeInstanceOf(AbortSignal);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(request.signal.aborted).toBe(true);
+    resolveMd?.({
+      content: 'stale server rules',
+      version: 1,
+      updated_at: '2026-07-16T00:00:00Z',
+      updated_by: 'operator',
+    });
+    await processing;
+
+    expect(groupMdCache.get(channelId)).toBeUndefined();
+    expect(queryAgent).not.toHaveBeenCalled();
   });
 
   // --- 2b. PR#51 per-session cwd wiring (regression: was uncovered) ---

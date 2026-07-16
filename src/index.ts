@@ -916,7 +916,9 @@ export async function handleMessage(
           channelId,
           cache: groupMdCache,
           threadCache: threadMdCache,
+          signal,
         });
+        if (signal.aborted) return;
         if (groupInstructions) {
           sessionOpts = { ...(sessionOpts ?? {}), groupInstructions };
         }
