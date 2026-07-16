@@ -177,6 +177,7 @@ describe('queryAgent', () => {
         settingSources: ['user', 'project'],
         model: 'claude-sonnet-4-20250514',
         maxTurns: 5,
+        maxConcurrentAgents: 2,
         systemPrompt: 'Custom instructions',
       },
     });
@@ -202,6 +203,7 @@ describe('queryAgent', () => {
     // systemPrompt is the claude_code preset (required for SDK auto-memory to
     // activate); our FROZEN composed text rides in `append`.
     const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.hooks.PreToolUse[0].matcher).toBe('Agent');
     const sp = callArgs.options.systemPrompt;
     expect(sp).toMatchObject({ type: 'preset', preset: 'claude_code' });
     expect(sp.append).toContain('untrusted IM users');

@@ -11,12 +11,14 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionMode, SettingSource, Settings, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import { DEFAULT_MAX_CONCURRENT_AGENTS } from './config.js';
 import type { Config } from './config.js';
 import { resolveSessionCwd } from './cwd-resolver.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { linkSkillsIntoSandbox } from './skill-linker.js';
 import { trustedText, escapeSectionMarkers, CURRENT_MESSAGE_ANCHOR } from './prompt-safety.js';
 import type { SafeText } from './prompt-safety.js';
+import { createSubagentHooks } from './subagent-limiter.js';
 
 
 /**
@@ -264,6 +266,9 @@ export async function* queryAgent(
   }
 
   const env = buildSdkEnv(config.sdk, process.env)
+  const subagentHooks = createSubagentHooks(
+    config.sdk.maxConcurrentAgents ?? DEFAULT_MAX_CONCURRENT_AGENTS,
+  );
 
   // Build + iterate the SDK stream for a given resume id and prompt. Extracted so
   // a stale/expired `resume` (the SDK throws "No conversation found with session
@@ -306,6 +311,7 @@ export async function* queryAgent(
           : { allowedTools: config.sdk.allowedTools }),
         permissionMode,
         maxTurns: config.sdk.maxTurns,
+        hooks: subagentHooks,
         model: config.sdk.model,
         settingSources,
         // #110: per-bot skill selection — enable only the listed skills (or 'all')

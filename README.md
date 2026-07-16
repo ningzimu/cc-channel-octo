@@ -203,6 +203,7 @@ configurable.
 | `sdk.allowedTools` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. |
 | `sdk.permissionMode` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | *(SDK default)* | Max agentic turns per query |
+| `sdk.maxConcurrentAgents` | `6` | Max concurrent subagents per root turn; `0` disables `Agent`. Nested subagents are always denied. |
 | `sdk.systemPrompt` | *(built-in)* | Custom system prompt (a `<baseDir>/<id>/SOUL.md` overrides this). |
 | `sdk.toolProgress` | `false` | When true, post `🔧 Running <tool>(<params>)…` notices as the agent invokes tools (params truncated; deduped, capped per turn) |
 | `sdk.settingSources` | `['project']` | Filesystem settings sources the SDK loads. Default `['project']` so it discovers skills symlinked into the session sandbox's `.claude/skills/` (see [Agent skills](#agent-skills)). Memory stays isolated regardless (inline auto-memory dir pin). Add `'user'` only to deliberately load the operator's real `~/.claude`. |

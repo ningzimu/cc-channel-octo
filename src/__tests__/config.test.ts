@@ -85,6 +85,7 @@ describe('loadConfig defaults', () => {
     // Q2: default is the wildcard sentinel — no whitelist applied at the SDK layer.
     expect(cfg.sdk.allowedTools).toBe('*');
     expect(cfg.sdk.permissionMode).toBe('bypassPermissions');
+    expect(cfg.sdk.maxConcurrentAgents).toBe(6);
     // #100: project-scope by default so the SDK discovers sandbox .claude/skills/.
     // Memory stays isolated via the inline autoMemoryDirectory pin.
     expect(cfg.sdk.settingSources).toEqual(['project']);
@@ -103,6 +104,60 @@ describe('loadConfig defaults', () => {
     // #100: skill dirs derived (per-bot + install-wide global).
     expect(bot.skillsDir).toBe(`${tmpDir}/default/skills`);
     expect(bot.globalSkillsDir).toBe(`${tmpDir}/skills`);
+  });
+});
+
+describe('sdk.maxConcurrentAgents', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('accepts a non-negative integer override', () => {
+    const path = writeConfig({
+      botToken: 'bf_test',
+      apiUrl: 'https://api.test',
+      sdk: { maxConcurrentAgents: 0 },
+    });
+
+    expect(loadConfig(path).sdk.maxConcurrentAgents).toBe(0);
+  });
+
+  it.each([-1, 1.5, '6'])('rejects invalid value %j', (maxConcurrentAgents) => {
+    const path = writeConfig({
+      botToken: 'bf_test',
+      apiUrl: 'https://api.test',
+      sdk: { maxConcurrentAgents },
+    });
+
+    expect(() => loadConfig(path)).toThrow(/sdk\.maxConcurrentAgents/);
+  });
+
+  it('supports a per-bot override', () => {
+    const path = writeConfig({
+      apiUrl: 'https://api.test',
+      bots: [{ id: 'worker' }],
+    });
+    writeBotConfig('worker', {
+      botToken: 'bf_worker',
+      sdk: { maxConcurrentAgents: 2 },
+    });
+
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.sdk.maxConcurrentAgents).toBe(2);
+  });
+
+  it('rejects an invalid per-bot override', () => {
+    const path = writeConfig({
+      apiUrl: 'https://api.test',
+      bots: [{ id: 'worker' }],
+    });
+    writeBotConfig('worker', {
+      botToken: 'bf_worker',
+      sdk: { maxConcurrentAgents: -1 },
+    });
+
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(
+      /Bot "worker": Invalid sdk\.maxConcurrentAgents/,
+    );
   });
 });
 

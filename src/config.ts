@@ -33,6 +33,8 @@ export const DEFAULT_CONFIG_PATH = pathJoin(homedir(), '.cc-channel-octo', 'conf
  */
 export type AllowedTools = string[] | '*';
 
+export const DEFAULT_MAX_CONCURRENT_AGENTS = 6;
+
 export interface Config {
   botToken: string;
   apiUrl: string;
@@ -163,6 +165,12 @@ export interface Config {
     allowedTools: AllowedTools;
     permissionMode: string;
     maxTurns?: number;
+    /**
+     * Maximum number of subagents running concurrently within one root turn.
+     * Defaults to 6. Set to 0 to disable Agent calls entirely. Subagents are
+     * never allowed to create nested subagents, regardless of this value.
+     */
+    maxConcurrentAgents?: number;
     systemPrompt?: string;
     /**
      * Which filesystem settings sources the SDK loads (`user`/`project`/`local`).
@@ -372,6 +380,7 @@ function defaults(): Config {
       // Q2: default to wildcard — operators tighten only when they need to.
       allowedTools: '*',
       permissionMode: 'bypassPermissions',
+      maxConcurrentAgents: DEFAULT_MAX_CONCURRENT_AGENTS,
       // #100: load project-scope settings so the SDK discovers skills symlinked
       // into the session sandbox's .claude/skills/. Memory stays isolated via the
       // inline settings.autoMemoryDirectory pin (flagSettings > projectSettings).
@@ -513,8 +522,17 @@ export function loadConfig(configPath?: string): Config {
       `or http://localhost/http://127.0.0.1 (SSRF protection)`,
     );
   }
+  assertMaxConcurrentAgents(final.sdk.maxConcurrentAgents);
 
   return final;
+}
+
+function assertMaxConcurrentAgents(value: unknown, prefix = ''): asserts value is number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `${prefix}Invalid sdk.maxConcurrentAgents: expected a non-negative integer, got ${String(value)}`,
+    );
+  }
 }
 
 /**
@@ -690,6 +708,8 @@ export function resolveBotConfigs(config: Config): Config[] {
     if (!isAllowedApiUrl(resolved.apiUrl)) {
       throw new Error(`Bot "${id}": unsafe apiUrl ${resolved.apiUrl} (SSRF protection)`);
     }
+    resolved.sdk.maxConcurrentAgents ??= DEFAULT_MAX_CONCURRENT_AGENTS;
+    assertMaxConcurrentAgents(resolved.sdk.maxConcurrentAgents, `Bot "${id}": `);
     // GROUP.md trust boundary: groupConfigDir must not be the bot's writable cwd.
     assertGroupConfigDirOutsideCwd(resolved);
     return resolved;
