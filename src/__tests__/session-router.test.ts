@@ -483,25 +483,31 @@ describe('dispatch timeout (#141)', () => {
       makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 50 }),
       ROBOT_ID,
     );
-    const completed: number[] = [];
+    const events: string[] = [];
 
-    // Message 1: handler never resolves (simulates a hung agent turn).
+    // Message 1: handler stays active until the router cancels it.
     const p1 = router.routeAndHandle(
       makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
-      () => new Promise<void>(() => { /* never resolves */ }),
+      (_result, { abortController }) => new Promise<void>((resolve) => {
+        events.push('first-started');
+        abortController.signal.addEventListener('abort', () => {
+          events.push('first-aborted');
+          resolve();
+        }, { once: true });
+      }),
     );
 
     // Message 2: a normal fast handler on the SAME session. Without the
     // timeout it would be blocked forever behind message 1's session lock.
     const p2 = router.routeAndHandle(
       makeMsg({ message_id: '2', channel_type: ChannelType.DM, from_uid: 'same-user' }),
-      async () => { completed.push(2); },
+      async () => { events.push('second-started'); },
     );
 
     await Promise.all([p1, p2]);
 
     // Message 2 ran — the lock was released after message 1 timed out.
-    expect(completed).toEqual([2]);
+    expect(events).toEqual(['first-started', 'first-aborted', 'second-started']);
   });
 
   it('sends a single bounded apology on timeout', async () => {
@@ -512,13 +518,47 @@ describe('dispatch timeout (#141)', () => {
 
     await router.routeAndHandle(
       makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'u1' }),
-      () => new Promise<void>(() => { /* never resolves */ }),
+      (_result, { abortController }) => new Promise<void>((resolve) => {
+        abortController.signal.addEventListener('abort', () => resolve(), { once: true });
+      }),
     );
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendMessage).mock.calls[0][0]).toMatchObject({
       content: expect.stringContaining('处理超时'),
     });
+  });
+
+  it('still releases the session after the abort grace when a handler ignores cancellation', async () => {
+    vi.useFakeTimers();
+    try {
+      const router = new SessionRouter(
+        makeConfig({ rateLimit: { maxPerMinute: 100 }, dispatchTimeoutMs: 30 }),
+        ROBOT_ID,
+      );
+      const completed: number[] = [];
+      let signal: AbortSignal | undefined;
+
+      const p1 = router.routeAndHandle(
+        makeMsg({ message_id: '1', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+        (_result, { abortController }) => {
+          signal = abortController.signal;
+          return new Promise<void>(() => { /* deliberately ignores cancellation */ });
+        },
+      );
+      const p2 = router.routeAndHandle(
+        makeMsg({ message_id: '2', channel_type: ChannelType.DM, from_uid: 'same-user' }),
+        async () => { completed.push(2); },
+      );
+
+      await vi.advanceTimersByTimeAsync(3_100);
+      await Promise.all([p1, p2]);
+
+      expect(signal?.aborted).toBe(true);
+      expect(completed).toEqual([2]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not fire for a normal fast handler', async () => {

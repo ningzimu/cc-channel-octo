@@ -419,9 +419,10 @@ export async function handleMessage(
   // For non-processed messages, routeAndHandle returns without calling handler.
   // We still need to cache group text messages for context.
   let wasProcessed = false;
-  const routeResult = await router.routeAndHandle(msg, async (result) => {
+  const routeResult = await router.routeAndHandle(msg, async (result, { abortController }) => {
     wasProcessed = true;
     const { sessionKey } = result;
+    const { signal } = abortController;
 
     try {
       // --- Session ---
@@ -455,6 +456,7 @@ export async function handleMessage(
               channelId,
               channelType,
               content: command.reply,
+              signal,
             });
           }
           // G8: send a read receipt for command messages too, mirroring the
@@ -467,6 +469,7 @@ export async function handleMessage(
               channelId: msg.channel_id,
               channelType: msg.channel_type,
               messageIds: [msg.message_id],
+              signal,
             }).catch(() => { /* read receipt is best-effort; never surface failures */ });
           }
           return; // skip context, history, and the agent query entirely
@@ -733,6 +736,7 @@ export async function handleMessage(
         }
       }
 
+      if (signal.aborted) return;
       store.appendUser(sessionKey, userContent, msg.message_seq, msg.from_name ?? msg.from_uid);
 
       // --- Session resume + first-turn history injection ---
@@ -814,6 +818,7 @@ export async function handleMessage(
         let noticeCount = 0;
         const MAX_TOOL_NOTICES = 10;
         onToolUse = (toolName: string, toolInput?: unknown): void => {
+          if (signal.aborted) return;
           const params = formatToolParams(toolInput);
           const label = params ? `${toolName}(${params})` : toolName;
           if (label === lastNotice) return; // collapse exact repeats
@@ -827,8 +832,11 @@ export async function handleMessage(
             channelId,
             channelType,
             content: `🔧 Running ${label}…`,
+            signal,
           }).catch((err) =>
-            console.error(`[cc-channel-octo] tool-progress send failed: ${String(err)}`),
+            signal.aborted
+              ? undefined
+              : console.error(`[cc-channel-octo] tool-progress send failed: ${String(err)}`),
           );
         };
       }
@@ -842,12 +850,17 @@ export async function handleMessage(
       // queryAgent recovers by calling onResumeFailed (clear the bad id) and
       // retrying once with the pre-assembled fallbackRetryPrompt so the
       // conversation isn't lost (and assembly happens exactly once — see above).
-      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackRetryPrompt?: string } | undefined = {
+      let sessionOpts: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackRetryPrompt?: string; abortController?: AbortController } | undefined = {
         ...(resume ? { resume } : {}),
-        onSessionId: (id: string) => store.setSdkSessionId(sessionKey, id),
+        abortController,
+        onSessionId: (id: string) => {
+          if (!signal.aborted) store.setSdkSessionId(sessionKey, id);
+        },
         ...(resume
           ? {
-              onResumeFailed: () => store.clearSdkSessionId(sessionKey),
+              onResumeFailed: () => {
+                if (!signal.aborted) store.clearSdkSessionId(sessionKey);
+              },
               fallbackRetryPrompt,
             }
           : {}),
@@ -959,12 +972,14 @@ export async function handleMessage(
         }
       }
 
+      if (signal.aborted) return;
       const rawChunks = queryAgent(userContentForLLM, config, sessionCtx, onToolUse, sessionOpts);
 
       // Tee the generator: collect full text while streaming to Octo
       const collected: string[] = [];
       async function* teeChunks(): AsyncIterable<string> {
         for await (const chunk of rawChunks) {
+          if (signal.aborted) return;
           collected.push(chunk);
           yield chunk;
         }
@@ -981,7 +996,9 @@ export async function handleMessage(
       const isValidMentionUid = isGroup
         ? (uid: string): boolean => groupContext.isMember(channelId, uid)
         : undefined;
-      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid);
+      await streamRelay.deliver(channelId, channelType, teeChunks(), config.apiUrl, config.botToken, config.maxResponseChars, outboundNameToUid, isValidMentionUid, signal);
+
+      if (signal.aborted) return;
 
       // G8: Send read receipt after processing (fire-and-forget)
       if (msg.message_id && msg.channel_id && msg.channel_type !== undefined) {
@@ -991,6 +1008,7 @@ export async function handleMessage(
           channelId: msg.channel_id,
           channelType: msg.channel_type,
           messageIds: [msg.message_id],
+          signal,
         }).catch(() => { /* read receipt is best-effort; never surface failures */ });
       }
 
@@ -1014,10 +1032,12 @@ export async function handleMessage(
           channelId,
           channelType,
           content: '[No response generated. Please try rephrasing your question.]',
+          signal,
         });
       }
 
     } catch (err) {
+      if (signal.aborted) return;
       console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
       // #115: attribute a FAILED cron fire to its task. handleMessage swallows
       // errors here (it sends a user-facing reply, never rethrows), so the
@@ -1035,6 +1055,7 @@ export async function handleMessage(
           channelId,
           channelType,
           content: 'An error occurred while processing your message. Please try again.',
+          signal,
         });
       } catch {
         /* swallow — don't crash on reply failure */

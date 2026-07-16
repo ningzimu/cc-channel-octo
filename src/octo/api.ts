@@ -65,7 +65,10 @@ export async function postJson<T>(
   signal?: AbortSignal,
 ): Promise<T | undefined> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
   const response = await fetch(url, {
     method: "POST",
     headers: {

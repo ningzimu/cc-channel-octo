@@ -36,6 +36,11 @@ export interface RouteResult {
   rejectionReason?: 'rate_limited' | 'oversized';
 }
 
+export interface DispatchContext {
+  /** Owned by the router; aborted when this dispatch exceeds its timeout. */
+  abortController: AbortController;
+}
+
 interface TokenBucket {
   tokens: number;
   lastRefill: number;
@@ -50,6 +55,12 @@ const GLOBAL_RATE_MULTIPLIER = 10;
 
 /** Maximum allowed content length in bytes (Q10). Messages exceeding this are rejected. */
 const MAX_CONTENT_BYTES = 32_768; // 32 KB
+
+/**
+ * Give cooperative handlers a short window to finish SDK/process cleanup after
+ * cancellation without reviving the permanent session wedge fixed by #141.
+ */
+const DISPATCH_ABORT_GRACE_MS = 3_000;
 
 export class SessionRouter {
   private readonly config: Config;
@@ -163,7 +174,7 @@ export class SessionRouter {
    */
   async routeAndHandle(
     msg: BotMessage,
-    handler: (result: RouteResult) => Promise<void>,
+    handler: (result: RouteResult, context: DispatchContext) => Promise<void>,
   ): Promise<RouteResult | null> {
     const key = this.sessionKey(msg);
     return this.withSessionLock(key, async () => {
@@ -183,59 +194,77 @@ export class SessionRouter {
    * stuck permanently (silent). Racing the handler against a timeout guarantees
    * the lock releases.
    *
-   * Scope (mirrors openclaw #75): we do NOT cancel the in-flight turn — the SDK
-   * query keeps running to completion in the background; we only unblock the
-   * queue. Worst case is a delayed real reply arriving after the apology.
-   *
-   * `timeoutError` is a per-invocation Error so the catch identifies OUR timeout
-   * by reference equality, never by string comparison (a same-text upstream
-   * error must not be misclassified).
+   * On timeout we abort the dispatch, give cooperative SDK/process cleanup a
+   * short bounded grace period, then release the lock. The production handler
+   * uses the same cancellation signal to fence late output and persistence.
    */
   private async runHandlerWithTimeout(
     result: RouteResult,
-    handler: (result: RouteResult) => Promise<void>,
+    handler: (result: RouteResult, context: DispatchContext) => Promise<void>,
   ): Promise<void> {
+    const abortController = new AbortController();
+    const context = { abortController } satisfies DispatchContext;
     const timeoutMs = this.config.dispatchTimeoutMs;
     if (!timeoutMs || timeoutMs <= 0) {
       // Timeout disabled — run unguarded.
-      await handler(result);
+      await handler(result, context);
       return;
     }
 
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeoutError = new Error(`dispatch timed out after ${timeoutMs}ms`);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(timeoutError), timeoutMs);
+    const timeoutOutcome = new Promise<{ kind: 'timeout' }>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
     });
 
-    // The handler keeps running after a timeout (we don't cancel the in-flight
-    // turn — see scope note above). Once the race settles on timeoutError, that
-    // orphaned promise is no longer awaited; attach a no-op catch so a late
-    // rejection from a handler that doesn't self-contain its errors can't surface
-    // as an unhandledRejection. Today's caller (index.ts) is fully try/caught, so
-    // this is defense-in-depth for future callers.
-    const handlerPromise = handler(result);
-    handlerPromise.catch(() => { /* swallow late rejection after timeout */ });
+    // Convert rejection into a value so a handler that settles after the timeout
+    // can never surface as an unhandled rejection.
+    const handlerOutcome = handler(result, context).then(
+      () => ({ kind: 'completed' } as const),
+      (error: unknown) => ({ kind: 'failed', error } as const),
+    );
 
     try {
-      await Promise.race([handlerPromise, timeoutPromise]);
-    } catch (err) {
-      if (err === timeoutError) {
+      const outcome = await Promise.race([handlerOutcome, timeoutOutcome]);
+      if (outcome.kind === 'timeout') {
+        const timeoutError = new Error(`dispatch timed out after ${timeoutMs}ms`);
+        abortController.abort(timeoutError);
+
         console.warn(
-          `session-router: dispatch hung past ${timeoutMs}ms, releasing session lock (session=${result.sessionKey})`,
+          `session-router: dispatch hung past ${timeoutMs}ms, cancelling active turn (session=${result.sessionKey})`,
         );
+
+        // Preserve #141's bounded queue-unblock guarantee even if a future handler
+        // ignores cancellation. Production handlers fence late side effects with
+        // this same signal before the lock is released.
+        let graceHandle: ReturnType<typeof setTimeout> | undefined;
+        const settledDuringGrace = await Promise.race([
+          handlerOutcome.then(() => true),
+          new Promise<boolean>((resolve) => {
+            graceHandle = setTimeout(() => resolve(false), DISPATCH_ABORT_GRACE_MS);
+          }),
+        ]);
+        if (graceHandle) clearTimeout(graceHandle);
+        if (!settledDuringGrace) {
+          console.warn(
+            `session-router: cancelled dispatch did not settle within ${DISPATCH_ABORT_GRACE_MS}ms; releasing session lock with stale side effects fenced (session=${result.sessionKey})`,
+          );
+        }
+
         // Bounded apology — replySafe swallows its own errors, and the
         // underlying sendMessage in octo/api.ts is itself time-bounded, so a
         // sick Octo API can't re-hang us here.
         await this.replySafe(result.message, '⚠️ 处理超时，请稍后重试。');
         return; // swallow: the lock releases, the queue advances
       }
-      // A real handler error — index.ts's handler already catches and replies
-      // internally, so reaching here is unexpected. Swallow to keep the lock
-      // release path identical (never let an error wedge the queue).
-      console.error(
-        `session-router: handler error (session=${result.sessionKey}): ${String(err)}`,
-      );
+
+      if (outcome.kind === 'failed') {
+        // A real handler error — index.ts's handler already catches and replies
+        // internally, so reaching here is unexpected. Swallow to keep the lock
+        // release path identical (never let an error wedge the queue).
+        console.error(
+          `session-router: handler error (session=${result.sessionKey}): ${String(outcome.error)}`,
+        );
+      }
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
     }

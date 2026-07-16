@@ -297,6 +297,54 @@ describe("StreamRelay", () => {
     expect(countLater).toBe(countAfter);
   });
 
+  it("drops partial output when the dispatch is cancelled", async () => {
+    const controller = new AbortController();
+    async function* cancelledChunks(): AsyncIterable<string> {
+      yield "partial";
+      controller.abort(new Error("dispatch timed out"));
+      throw new Error("cancelled stream");
+    }
+
+    const promise = relay.deliver(
+      CH_ID,
+      CH_TYPE,
+      cancelledChunks(),
+      API_URL,
+      BOT_TOKEN,
+      undefined,
+      undefined,
+      undefined,
+      controller.signal,
+    );
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBeUndefined();
+
+    const sendCalls = mockState.calls.filter((c) => c.fn === "sendMessage");
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it("forwards the dispatch signal to typing and message requests", async () => {
+    const controller = new AbortController();
+    const promise = relay.deliver(
+      CH_ID,
+      CH_TYPE,
+      asyncChunks(["hello"]),
+      API_URL,
+      BOT_TOKEN,
+      undefined,
+      undefined,
+      undefined,
+      controller.signal,
+    );
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const typingCall = mockState.calls.find((c) => c.fn === "sendTyping");
+    const sendCall = mockState.calls.find((c) => c.fn === "sendMessage");
+    expect(typingCall?.args.signal).toBe(controller.signal);
+    expect(sendCall?.args.signal).toBe(controller.signal);
+  });
+
   it("passes apiUrl and botToken to sendMessage", async () => {
     const chunks = asyncChunks(["test content"]);
     const promise = relay.deliver(CH_ID, CH_TYPE, chunks, API_URL, BOT_TOKEN);

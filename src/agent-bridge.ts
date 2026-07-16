@@ -224,6 +224,8 @@ const MAX_SYSTEM_PROMPT_CHARS = 100 * 1024;
  *     caller injects nothing (history already lives in the session).
  *   - `onSessionId`: called with the SDK session id observed for this turn, so
  *     the caller can persist it and resume next time.
+ *   - `abortController`: owned by the dispatch router and forwarded to the SDK
+ *     so timeout cancellation terminates the query and its resources.
  * @yields string chunks of assistant text output
  */
 export async function* queryAgent(
@@ -231,7 +233,7 @@ export async function* queryAgent(
   config: Config,
   sessionCtx?: SessionCtx,
   onToolUse?: (toolName: string, toolInput?: unknown) => void,
-  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackRetryPrompt?: string },
+  opts?: { resume?: string; onSessionId?: (id: string) => void; groupInstructions?: string; memoryDir?: string; mcpServers?: Record<string, McpServerConfig>; onResumeFailed?: () => void; fallbackRetryPrompt?: string; abortController?: AbortController },
 ): AsyncIterable<string> {
   const permissionMode = toPermissionMode(config.sdk.permissionMode);
   const settingSources = toSettingSources(config.sdk.settingSources);
@@ -314,6 +316,7 @@ export async function* queryAgent(
         // #115: in-process MCP servers (e.g. the cron tool) injected by the caller
         // for this turn. Omitted when none.
         ...(opts?.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+        ...(opts?.abortController ? { abortController: opts.abortController } : {}),
         allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
       },
     });

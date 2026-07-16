@@ -2,7 +2,7 @@
  * Tests for postJson default timeout behavior (Q2 fix).
  *
  * Verifies that postJson applies a 30s default timeout when no signal is provided,
- * and respects caller-provided signals when explicitly passed.
+ * and combines it with caller-provided cancellation signals.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -35,7 +35,7 @@ describe("postJson default timeout", () => {
     expect((options.signal as AbortSignal).aborted).toBe(false);
   });
 
-  it("uses caller-provided signal when explicitly passed", async () => {
+  it("combines caller cancellation with the default timeout", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       text: () => Promise.resolve('{"result": "ok"}'),
@@ -52,7 +52,12 @@ describe("postJson default timeout", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const options = mockFetch.mock.calls[0][1] as RequestInit;
-    expect(options.signal).toBe(controller.signal);
+    const effectiveSignal = options.signal as AbortSignal;
+    expect(effectiveSignal).not.toBe(controller.signal);
+    expect(effectiveSignal.aborted).toBe(false);
+
+    controller.abort(new Error("dispatch timed out"));
+    expect(effectiveSignal.aborted).toBe(true);
   });
 
   it("rejects with abort error when timeout fires", async () => {

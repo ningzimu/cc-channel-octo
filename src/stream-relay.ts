@@ -166,13 +166,16 @@ export class StreamRelay {
     maxResponseChars: number = DEFAULT_MAX_RESPONSE_CHARS,
     memberMap?: Map<string, string>,
     isValidUid?: (uid: string) => boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) return;
+
     // --- Typing heartbeat ---
-    const typingParams = { apiUrl, botToken, channelId, channelType };
+    const typingParams = { apiUrl, botToken, channelId, channelType, signal };
     // Fire one immediately — don't wait for the first interval tick.
     sendTyping(typingParams).catch(() => {});
     const typingTimer = setInterval(() => {
-      sendTyping(typingParams).catch(() => {});
+      if (!signal?.aborted) sendTyping(typingParams).catch(() => {});
     }, TYPING_INTERVAL_MS);
 
     try {
@@ -186,6 +189,7 @@ export class StreamRelay {
       let streamError: unknown;
       try {
         for await (const chunk of chunks) {
+          if (signal?.aborted) return;
           accumulated += chunk;
           // Q32: Stop accumulating once limit is reached to prevent unbounded memory.
           if (accumulated.length > maxResponseChars) {
@@ -201,9 +205,13 @@ export class StreamRelay {
           }
         }
       } catch (err) {
+        // A dispatch timeout owns the user-facing apology. Do not flush partial
+        // output from the stale turn or surface the expected cancellation error.
+        if (signal?.aborted) return;
         streamError = err;
         console.error(`[stream-relay] agent stream threw after ${accumulated.length} char(s); flushing partial output: ${String(err)}`);
       }
+      if (signal?.aborted) return;
       if (truncated) {
         console.warn(`[stream-relay] Response truncated at ${maxResponseChars} chars`);
       }
@@ -231,6 +239,7 @@ export class StreamRelay {
         let segStart = 0;
         let mentionAllConsumed = false;
         for (const segment of segments) {
+          if (signal?.aborted) return;
           const segEnd = segStart + segment.length;
           // Partition entities falling within this segment, re-rebase to
           // segment-local offsets. Server expects per-message offsets.
@@ -267,8 +276,10 @@ export class StreamRelay {
               ...(segUids.length > 0 ? { mentionUids: segUids } : {}),
               ...(segEntities.length > 0 ? { mentionEntities: segEntities } : {}),
               ...(useMentionAll ? { mentionAll: true } : {}),
+              signal,
             });
           } catch (err) {
+            if (signal?.aborted) return;
             console.error(`[stream-relay] sendMessage failed for segment (${segment.length} chars), continuing: ${String(err)}`);
             // Continue sending remaining segments — don't let one failure drop the rest
           }

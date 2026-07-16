@@ -448,6 +448,19 @@ describe('queryAgent', () => {
     expect(mockQuery.mock.calls[0][0].options.settingSources).toEqual(['project']);
   });
 
+  it('forwards the dispatch AbortController to the SDK', async () => {
+    mockQuery.mockReturnValue(createMockStream([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } },
+    ]));
+    const abortController = new AbortController();
+
+    for await (const _ of queryAgent('t', makeConfig(), undefined, undefined, { abortController })) {
+      void _;
+    }
+
+    expect(mockQuery.mock.calls[0][0].options.abortController).toBe(abortController);
+  });
+
   it('reports the SDK session_id once via onSessionId', async () => {
     mockQuery.mockReturnValue(createMockStream([
       { type: 'assistant', session_id: 'sid-xyz', message: { content: [{ type: 'text', text: 'a' }] } },
