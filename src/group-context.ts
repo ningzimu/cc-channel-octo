@@ -246,7 +246,12 @@ export class GroupContext {
     }
   }
 
-  async refreshMembers(channelId: string, apiUrl: string, botToken: string): Promise<void> {
+  async refreshMembers(
+    channelId: string,
+    apiUrl: string,
+    botToken: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const now = Date.now();
     const last = this.lastRefresh.get(channelId) ?? 0;
     if (now - last < REFRESH_INTERVAL_MS) return;
@@ -260,7 +265,8 @@ export class GroupContext {
       // flags) keyed by the full channelId, so a thread keeps its own isolated
       // roster view. For a plain group channelId extractParentGroupNo is identity.
       const groupNo = extractParentGroupNo(channelId);
-      const members = await getGroupMembers({ apiUrl, botToken, groupNo });
+      const members = await getGroupMembers({ apiUrl, botToken, groupNo, signal });
+      if (signal?.aborted) return;
       this.lastRefresh.set(channelId, now); // Record only on success
       const memberMap = this.getMemberMap(channelId);
       const nameMap = this.getNameToUid(channelId);
@@ -336,6 +342,7 @@ export class GroupContext {
         }
       }
     } catch (err) {
+      if (signal?.aborted) return;
       console.error(`group-context: refreshMembers(${channelId}) failed: ${String(err)}`);
       // Don't update lastRefresh on failure — allow retry
     }

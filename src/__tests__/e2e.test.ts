@@ -72,6 +72,7 @@ import { handleMessage } from '../index.js';
 import {
   sendMessage,
   sendReadReceipt,
+  getGroupMembers,
   getChannelMessages,
 } from '../octo/api.js';
 import { ChannelType, MessageType } from '../octo/types.js';
@@ -489,6 +490,85 @@ describe('E2E smoke tests', () => {
     const history = store.buildHistoryPrefix(sessionKey, 40);
     expect(history).toContain('[user TestUser]: What is this code?');
     expect(history).toContain('[assistant bot-001]: Hello from Claude');
+  });
+
+  it('dispatch timeout prevents delayed roster refresh from mutating group context', async () => {
+    const channelId = 'group-cancelled-roster';
+    const timeoutConfig = makeConfig({ dispatchTimeoutMs: 10 });
+    const timeoutRouter = new SessionRouter(timeoutConfig, BOT_ID);
+    let resolveMembers: ((members: Array<{ uid: string; name: string; role: number }>) => void) | undefined;
+    (getGroupMembers as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveMembers = resolve; }),
+    );
+
+    const processing = simulateMessage(
+      makeGroupMsg('delayed roster', true, { channel_id: channelId }),
+      timeoutConfig,
+      store,
+      timeoutRouter,
+      groupContext,
+      streamRelay,
+    );
+    await vi.waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+    const request = (getGroupMembers as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(request.signal).toBeInstanceOf(AbortSignal);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(request.signal.aborted).toBe(true);
+    resolveMembers?.([{ uid: 'late-user', name: 'Late User', role: 0 }]);
+    await processing;
+
+    expect(groupContext.getName('late-user', channelId)).toBeUndefined();
+    expect(groupContext.buildContextSince(channelId, 0).text).toBe('');
+    expect(groupContext.getContextCursor(channelId)).toBe(0);
+  });
+
+  it('dispatch timeout prevents delayed G4 backfill from persisting stale history', async () => {
+    const channelId = 'group-cancelled-backfill';
+    const timeoutConfig = makeConfig({ dispatchTimeoutMs: 10 });
+    const timeoutRouter = new SessionRouter(timeoutConfig, BOT_ID);
+    let resolveHistory: ((messages: Array<{ from_uid: string; content: string; timestamp: number; message_seq: number }>) => void) | undefined;
+    (getChannelMessages as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveHistory = resolve; }),
+    );
+
+    const first = simulateMessage(
+      makeGroupMsg('first turn', true, { channel_id: channelId, message_seq: 2 }),
+      timeoutConfig,
+      store,
+      timeoutRouter,
+      groupContext,
+      streamRelay,
+    );
+    await vi.waitFor(() => expect(getChannelMessages).toHaveBeenCalledTimes(1));
+    const request = (getChannelMessages as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(request.signal).toBeInstanceOf(AbortSignal);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(request.signal.aborted).toBe(true);
+    resolveHistory?.([
+      { from_uid: 'old-user', content: 'stale history', timestamp: 1, message_seq: 1 },
+    ]);
+    await first;
+    expect(store.buildHistoryPrefix(channelId, 40)).toBe('');
+
+    (getChannelMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { from_uid: 'old-user', content: 'retry history', timestamp: 1, message_seq: 1 },
+    ]);
+    const retryConfig = makeConfig();
+    const retryRouter = new SessionRouter(retryConfig, BOT_ID);
+    await simulateMessage(
+      makeGroupMsg('second turn', true, { channel_id: channelId, message_seq: 3 }),
+      retryConfig,
+      store,
+      retryRouter,
+      groupContext,
+      streamRelay,
+    );
+
+    expect(getChannelMessages).toHaveBeenCalledTimes(2);
+    expect(store.buildHistoryPrefix(channelId, 40)).toContain('retry history');
+    expect(store.buildHistoryPrefix(channelId, 40)).not.toContain('stale history');
   });
 
   // --- 2b. PR#51 per-session cwd wiring (regression: was uncovered) ---

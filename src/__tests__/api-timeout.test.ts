@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { postJson } from "../octo/api.js";
+import { getGroupMembers, postJson } from "../octo/api.js";
 
 // Mock the global fetch before any postJson calls.
 const mockFetch = vi.fn();
@@ -165,5 +165,34 @@ describe("postJson default timeout", () => {
     expect(result).toBeDefined();
     expect(result!.message_id).toBe("123456789012345678");
     expect(result!.data).toBe("ok");
+  });
+});
+
+describe("GET request cancellation", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("combines caller cancellation with the default timeout", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('{"members": []}'),
+    });
+
+    const controller = new AbortController();
+    await getGroupMembers({
+      apiUrl: "https://api.example.com",
+      botToken: "test-token",
+      groupNo: "group-1",
+      signal: controller.signal,
+    });
+
+    const options = mockFetch.mock.calls[0][1] as RequestInit;
+    const effectiveSignal = options.signal as AbortSignal;
+    expect(effectiveSignal).not.toBe(controller.signal);
+    expect(effectiveSignal.aborted).toBe(false);
+
+    controller.abort(new Error("dispatch timed out"));
+    expect(effectiveSignal.aborted).toBe(true);
   });
 });

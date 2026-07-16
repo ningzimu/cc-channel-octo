@@ -484,7 +484,8 @@ export async function handleMessage(
       // session, so re-showing them would be redundant and would bloat the session.
       let groupContextBlock = '';
       if (isGroup) {
-        await groupContext.refreshMembers(channelId, config.apiUrl, config.botToken);
+        await groupContext.refreshMembers(channelId, config.apiUrl, config.botToken, signal);
+        if (signal.aborted) return;
         const cursor = groupContext.getContextCursor(channelId);
         const delta = groupContext.buildContextSince(channelId, cursor);
         if (delta.text) {
@@ -716,7 +717,12 @@ export async function handleMessage(
             channelId: msg.channel_id,
             channelType: msg.channel_type,
             limit: Math.min(config.context.historyLimit, 100),
+            signal,
           });
+          if (signal.aborted) {
+            backfilledSessions.delete(backfillKey);
+            return;
+          }
           if (apiMessages.length > 0) {
             // Persist into local store so subsequent turns hit cache,
             // and rebuild historyPrefix with the enriched data. Pass the
@@ -732,6 +738,10 @@ export async function handleMessage(
             historyPrefix = store.buildSegmentedHistoryPrefix(sessionKey, config.context.historyLimit);
           }
         } catch (err) {
+          if (signal.aborted) {
+            backfilledSessions.delete(backfillKey);
+            return;
+          }
           console.error(`[cc-channel-octo] G4 backfill failed for ${sessionKey}: ${String(err)}`);
         }
       }

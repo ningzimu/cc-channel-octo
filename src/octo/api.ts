@@ -274,7 +274,10 @@ async function getJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
-  const effectiveSignal = signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const effectiveSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
   const resp = await fetch(url, {
     method: "GET",
     headers: {
@@ -328,11 +331,13 @@ export async function getGroupMembers(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;
+  signal?: AbortSignal;
 }): Promise<GroupMember[]> {
   const data = await getJson<Record<string, unknown>>(
     params.apiUrl,
     params.botToken,
     `/v1/bot/groups/${params.groupNo}/members`,
+    params.signal,
   );
   const members = Array.isArray(data?.members)
     ? data.members
