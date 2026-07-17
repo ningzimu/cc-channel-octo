@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   HookCallback,
   PreToolUseHookInput,
@@ -67,6 +67,14 @@ function decision(output: Awaited<ReturnType<HookCallback>>): string | undefined
 }
 
 describe('createSubagentHooks', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('denies Agent calls made by a subagent', async () => {
     const hooks = createSubagentHooks(6);
     const output = await getHook(hooks, 'PreToolUse')(
@@ -79,22 +87,50 @@ describe('createSubagentHooks', () => {
     expect(output.hookSpecificOutput).toMatchObject({
       permissionDecisionReason: 'Nested subagents are not supported by cc-channel-octo.',
     });
+    expect(console.warn).toHaveBeenCalledWith(
+      '[cc-channel-octo] subagent denied: reason=nested ' +
+        'session_id=session-1 agent_id=parent-agent',
+    );
   });
 
-  it('caps concurrent root subagents and frees a slot on stop', async () => {
-    const hooks = createSubagentHooks(2);
+  it('caps wide root fan-out at the default limit', async () => {
+    const hooks = createSubagentHooks(6);
+    const before = getHook(hooks, 'PreToolUse');
+
+    for (let i = 1; i <= 6; i += 1) {
+      expect(
+        decision(await before(preToolUse(`tool-${i}`), `tool-${i}`, hookOptions)),
+      ).toBeUndefined();
+    }
+
+    const denied = await before(preToolUse('tool-7'), 'tool-7', hookOptions);
+    expect(decision(denied)).toBe('deny');
+    expect(console.warn).toHaveBeenCalledWith(
+      '[cc-channel-octo] subagent denied: reason=concurrency-limit ' +
+        'session_id=session-1 active=6 limit=6',
+    );
+  });
+
+  it('tracks overlapping agents and frees slots after out-of-order stops', async () => {
+    const hooks = createSubagentHooks(3);
     const before = getHook(hooks, 'PreToolUse');
     const start = getHook(hooks, 'SubagentStart');
     const stop = getHook(hooks, 'SubagentStop');
 
-    expect(decision(await before(preToolUse('tool-1'), 'tool-1', hookOptions))).toBeUndefined();
-    expect(decision(await before(preToolUse('tool-2'), 'tool-2', hookOptions))).toBeUndefined();
-    expect(decision(await before(preToolUse('tool-3'), 'tool-3', hookOptions))).toBe('deny');
+    for (let i = 1; i <= 3; i += 1) {
+      expect(
+        decision(await before(preToolUse(`tool-${i}`), `tool-${i}`, hookOptions)),
+      ).toBeUndefined();
+      await start(subagentStart(`agent-${i}`), undefined, hookOptions);
+    }
 
-    await start(subagentStart('agent-1'), undefined, hookOptions);
-    await stop(subagentStop('agent-1'), undefined, hookOptions);
-
+    await stop(subagentStop('agent-2'), undefined, hookOptions);
     expect(decision(await before(preToolUse('tool-4'), 'tool-4', hookOptions))).toBeUndefined();
+    await start(subagentStart('agent-4'), undefined, hookOptions);
+    expect(decision(await before(preToolUse('tool-5'), 'tool-5', hookOptions))).toBe('deny');
+
+    await stop(subagentStop('agent-1'), undefined, hookOptions);
+    expect(decision(await before(preToolUse('tool-6'), 'tool-6', hookOptions))).toBeUndefined();
   });
 
   it('supports zero as a hard disable for root Agent calls', async () => {

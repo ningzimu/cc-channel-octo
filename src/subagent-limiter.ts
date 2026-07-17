@@ -36,10 +36,18 @@ export function createSubagentHooks(maxConcurrentAgents: number): SdkHooks {
     if (input.hook_event_name !== 'PreToolUse' || input.tool_name !== 'Agent') return {};
 
     if (input.agent_id) {
+      console.warn(
+        '[cc-channel-octo] subagent denied: reason=nested ' +
+          `session_id=${input.session_id} agent_id=${input.agent_id}`,
+      );
       return denyAgent('Nested subagents are not supported by cc-channel-octo.');
     }
 
     if (admittedCount >= maxConcurrentAgents) {
+      console.warn(
+        '[cc-channel-octo] subagent denied: reason=concurrency-limit ' +
+          `session_id=${input.session_id} active=${admittedCount} limit=${maxConcurrentAgents}`,
+      );
       return denyAgent(
         `Subagent concurrency limit of ${maxConcurrentAgents} reached for this root turn.`,
       );
